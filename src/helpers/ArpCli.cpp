@@ -5,7 +5,7 @@ namespace pcapturepp {
     /******* ArpCli definitions *******/
     /* PUBLIC METHODS */
 
-    ArpCli::ArpCli() : _tgt_ip("0.0.0.0"), _src_ip("0.0.0.0"), _gateway_ip("0.0.0.0"), _fullduplex(false), _running(false) {
+    ArpCli::ArpCli() : _tgt_ip("0.0.0.0"), _src_ip("0.0.0.0"), _gateway_ip("0.0.0.0"), _fullduplex(false), _running(false), _net_probed(false), _probing(false) {
         _command_list["config"] = {"src", "tgt", "fullduplex", "tgt_mac", "router" , "router_mac", "iface", "src_mac"};
         _command_list["net"] = {"probe"};
         _command_list["status"] = uset<string>();
@@ -136,9 +136,21 @@ namespace pcapturepp {
             return message;
         }
 
-        string duplex, run;
+        string duplex, run, probe;
         _fullduplex == true ? duplex = string(C_GREEN) + "set" + string(C_NONE) : duplex = string(C_YELLOW) + "unset" + string(C_NONE);
+        if (_probing) {
+            probe = string(C_YELLOW) + "probing" + string(C_NONE);
+        } else {
+            probe = "not probing";
+        }
 
+        if (_net_probed) {
+            probe = string(C_GREEN) + "probed" + string(C_NONE);
+        }
+
+        UINT num_devs = _devices_found.size();
+
+        // _probe_net == true ? probe = string(C_GREEN) + "yes" + string(C_NONE) : probe = string(C_YELLOW) + "no" + string(C_NONE);
         cout << "ARP General Status:\n"
              << "Source IP:          " << _src_ip << "\n"
              << "Source MAC:         " << PrintMACArray(_src_mac) << "\n"
@@ -148,7 +160,9 @@ namespace pcapturepp {
              << "Gateway MAC:        " << PrintMACArray(_gateway_mac) << "\n"
              << "Interface:          " << _iface << "\n"
              << "Full Duplex:        " << duplex << "\n"
-             << endl;
+             << "Probe status:       " << probe << "\n";
+        if (_net_probed) cout << "Devices online:     " << num_devs << "\n";
+        cout << endl;
         return message;
     }
 
@@ -268,32 +282,45 @@ namespace pcapturepp {
     }
 
 
-    string ArpCli::ProbeNet(const vector<string>& args) {
+    string ArpCli::ProbeNet(const vector<string>& args, bool callback) {
         std::stringstream message;
-        auto it = _command_list[args[0]].find(args[1]);
-        if (!ValidateArgs(args, 2) || it == _command_list[args[0]].end()) {
-            message << CMD_ERROR;
-            return message.str();
-        }
 
         // Launch a new thread for the network probing
-        message << endl << C_GREEN << "Starting to probe, please wait..." << C_NONE;
+        if (!callback) {
 
-        std::thread([this]() {
-            vector<DeviceInfo> devices;
-            try {
-                devices = GetAllConnectedDevices(_iface);
-                UINT idx = 1;
-                for (const DeviceInfo& dev : devices) {
-                    string d_id = "D";
-                    d_id += std::to_string(idx);
-                    _devices_found[d_id] = dev;
-                    idx++;
-                }
-            } catch (const std::runtime_error& e) {
-                return;
+            auto it = _command_list[args[0]].find(args[1]);
+            if (!ValidateArgs(args, 2) || it == _command_list[args[0]].end()) {
+                message << CMD_ERROR;
+                return message.str();
             }
-        }).detach();
+            message << endl << C_GREEN << "Starting to probe, please wait..." << C_NONE;
+            _probing = true;
+            std::thread([this]() {
+                vector<DeviceInfo> devices;
+                try {
+                    devices = GetAllConnectedDevices(_iface);
+                    UINT idx = 1;
+                    for (const DeviceInfo& dev : devices) {
+                        string d_id = "D";
+                        d_id += std::to_string(idx);
+                        _devices_found[d_id] = dev;
+                        idx++;
+                        if (dev.is_own) {
+                            _src_ip = dev.ip;
+                            _src_mac = dev.mac;
+                        }
+                    }
+                } catch (const std::runtime_error& e) {
+                    return;
+                }
+
+                _probing = false;
+                _net_probed = true;
+                ProbeNet(vector<string>(), true);
+            }).detach();
+        } else {
+            message << endl << C_GREEN "Probe finished successfully!" << C_NONE;
+        }
 
         // Return immediately since the thread is detached
         return message.str();

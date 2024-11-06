@@ -17,6 +17,11 @@ namespace pcapturepp {
                 _queue.push(item);
                 _cv.notify_one();
             }
+
+            void Clear() {
+                std::queue<T> eq;
+                std::swap(_queue, eq);
+            }
             
             T Pop() {
                 std::unique_lock<std::mutex> lock(_mtx);

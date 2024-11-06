@@ -5,23 +5,40 @@
 namespace pcapturepp {
 namespace controllers {
     MainController::MainController() 
-        : _cli_queue(), _mres_queue(), _creq_queue(), _cres_queue() {}
+        : _cli_queue(), _mres_queue(), _creq_queue(), _cres_queue(), _stop_request(true) {}
 
     void MainController::Start() {
+        Stop();
+        _stop_request = false;
         _module = std::make_unique<modules::ArpSpoofer>();
-        std::thread(&MainController::ForwardToModule, this).detach();
-        std::thread(&MainController::FetchResponseStream, this).detach();
-        std::thread(&MainController::ProccessModuleResponse, this).detach();
-        std::thread(&MainController::RespondCliBack, this).detach();
+        _threads.emplace_back(&MainController::ForwardToModule, this);
+        _threads.emplace_back(&MainController::FetchResponseStream, this);
+        _threads.emplace_back(&MainController::ProccessModuleResponse, this);
+        _threads.emplace_back(&MainController::RespondCliBack, this);
+    }
+
+    void MainController::Stop() {
+        _stop_request = true;
+
+        for (auto& thread : _threads) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+
+        _threads.clear(); 
+        _cli_queue.Clear();
+        _mres_queue.Clear();
+        _cres_queue.Clear();
     }
 
     void MainController::ProcessCliRequests(const CliRequest& request) {
         // Addes to the async queue
-        _cli_queue.Push(request);
+        if (!_stop_request) _cli_queue.Push(request);
     }
 
     void MainController::ForwardToModule() {
-        while (true) {
+        while (!_stop_request) {
             if (_cli_queue.Empty()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
@@ -33,7 +50,7 @@ namespace controllers {
     }
 
     void MainController::FetchResponseStream() {
-        while (true) {
+        while (!_stop_request) {
             std::optional<ModuleResponse> res = _module->ResponseStreamer();
             if (res) {
                 _mres_queue.Push(*res);
@@ -43,7 +60,7 @@ namespace controllers {
     }
  
     void MainController::ProccessModuleResponse() {
-        while (true) {
+        while (!_stop_request) {
             if (_mres_queue.Empty()) continue;
             ModuleResponse mres = _mres_queue.Pop();
             _cres_queue.Push(mres);

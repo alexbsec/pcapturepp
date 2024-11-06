@@ -1,4 +1,7 @@
 #include "ArpSpoofing.hpp"
+#include "NetProber.hpp"
+
+using namespace pcapturepp::netprober;
 
 namespace pcapturepp {
 namespace modules {
@@ -20,42 +23,46 @@ namespace modules {
             inet_pton(AF_INET, request.configs.arp_config->gateway_ip.c_str(), _spoof_params.spoofing_ip.data()); // Gateway (Router) IP
 
             _configured = true;
-
-            // Handle start/stop actions for ARP spoofing
-            if (request.action == pcapturepp::structures::Actions::STOP && _run) {
-                _run = false;
-                response.message = "ArpSpoofing stopped successfully.";
-            } else if (request.action == pcapturepp::structures::Actions::START && _configured) {
-                if (!_run) {
-                    _run = true;
-                    // Start the spoofing thread
-                    std::thread([this]() {
-                        while (_run) {
-                            Spoof();
-                            
-                        }
-                    }).detach();
-                }
-                response.message = "ArpSpoofing started successfully.";
-            } else {
-                response.message = "ArpSpoofing action could not be processed.";
-                response.success = false;
-                response.type = pcapturepp::structures::ResponseType::ERROR;
-                response.timestamp = std::chrono::steady_clock::now();
-                return;
-            }
-
-            // If everything goes well, set the appropriate response type and timestamp
-            response.type = pcapturepp::structures::ResponseType::STATUS_UPDATE;
-            response.success = true;
-            response.timestamp = std::chrono::steady_clock::now();
-        } else {
+        } 
+        
+        if (!_configured) {
             // Handle missing ARP configuration
             response.type = pcapturepp::structures::ResponseType::ERROR;
             response.message = "Failed to configure ArpSpoofer: ARP config missing.";
             response.success = false;
             response.timestamp = std::chrono::steady_clock::now();
+            _response_queue.Push(response);
+            return;
         }
+
+            // Handle start/stop actions for ARP spoofing
+        if (request.action == pcapturepp::structures::Actions::STOP && _run) {
+            _run = false;
+            response.message = "ArpSpoofing stopped successfully.";
+        } else if (request.action == pcapturepp::structures::Actions::START && _configured) {
+            if (!_run) {
+                _run = true;
+                // Start the spoofing thread
+                std::thread([this]() {
+                    while (_run) {
+                        Spoof();                        
+                    }
+                }).detach();
+            }
+            response.message = "ArpSpoofing started successfully.";
+        } else {
+            response.message = "ArpSpoofing action could not be processed.";
+            response.success = false;
+            response.type = pcapturepp::structures::ResponseType::ERROR;
+            response.timestamp = std::chrono::steady_clock::now();
+            _response_queue.Push(response);
+            return;
+        }
+
+        // If everything goes well, set the appropriate response type and timestamp
+        response.type = pcapturepp::structures::ResponseType::STATUS_UPDATE;
+        response.success = true;
+        response.timestamp = std::chrono::steady_clock::now();
 
         _response_queue.Push(response);
     }
@@ -169,11 +176,10 @@ namespace modules {
         array<UINT8, 64> packetToRouter;
         BuildArpPacket(packetToRouter, routerParams);
 
-        while (_run) {
-            SendSpoofedPacket(handle, packetToTarget);
-            SendSpoofedPacket(handle, packetToRouter);
-            std::this_thread::sleep_for(std::chrono::milliseconds(400));
-        }
+        SendSpoofedPacket(handle, packetToTarget);
+        SendSpoofedPacket(handle, packetToRouter);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
 
         if (capture_thread.joinable()) {
             capture_thread.join();
@@ -233,7 +239,9 @@ namespace modules {
 
                 // Determine if it's HTTPS
                 if (src_port == 443 || dst_port == 443) {
-                    std::cout << "[HTTPS Packet] Source IP: " << src_ip << " Destination IP: " << dst_ip << std::endl;
+                    string dest = GetHostname(dst_ip);
+                    dest == "unknown" ? dst_ip : dest;
+                    std::cout << "[HTTPS Packet] Source IP: " << src_ip << " Destination: " << dest << std::endl;
                 }
 
                 // Other TCP-based protocols can be parsed similarly

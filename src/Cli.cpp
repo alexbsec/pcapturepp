@@ -1,5 +1,7 @@
 #include "Cli.hpp"
 
+std::mutex console_mutex;
+
 namespace pcapturepp {
     /******* ArpCli Definitions *******/
     /* PUBLIC METHODS */
@@ -65,7 +67,7 @@ namespace pcapturepp {
     /******* Cli definitions *******/
     /* PUBLIC METHODS */
 
-    Cli::Cli() : _module_prefix(""), _history_index(-1), _running(false) {
+    Cli::Cli() : _module_prefix(""), _history_index(-1) {
         _modules[Modules::ARP] = std::make_unique<ArpCli>();
         _modules[Modules::DNS] = std::make_unique<DnsCli>();
         _modules[Modules::HTTPS] = std::make_unique<HttpsCli>();
@@ -79,6 +81,11 @@ namespace pcapturepp {
         _command_list["dns"]  = {Modules::DNS};
         _command_list["tls"]  = {Modules::HTTPS};
         _command_list["run"]  = vector<Modules>();
+        _command_list["stop"] = vector<Modules>();
+
+        _module_running[Modules::ARP] = false;
+        _module_running[Modules::DNS] = false;
+        _module_running[Modules::HTTPS] = false;
 
         _controller = std::make_unique<controllers::MainController>();
 
@@ -91,6 +98,22 @@ namespace pcapturepp {
 
     void Cli::Start() {
         Hail();
+        _controller->Start();
+
+        // Thread to keep checking for responses
+        std::thread([this]() {
+            while (true) {
+                std::optional<ModuleResponse> response = _controller->RespondCliBack();
+                if (response) {
+                    std::lock_guard<std::mutex> lock(console_mutex);
+                    UpdateTimeBuffer();
+                    structures::ThreadInput *ti = new structures::ThreadInput(response->message);
+                    PrintCli(_time_buffer, ti);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        }).detach();
+
         ProcessInput();
     }
 
@@ -150,15 +173,37 @@ namespace pcapturepp {
 
                 auto it = _command_list.find(args[0]);
                 if (it != _command_list.end()) {
-                    if (args[0] != "run") {
+                    if (args[0] != "run" && args[0] != "stop") {
                         _module_prefix = _input;
                         cmd_found = true;
-                    } else if (args.size() == 2 && args[0] == "run") {
-                        try {
-                            Modules mod = StringToModule(args[1]);
-                            Run(mod);
+                    } else if (args[0] == "run") {
+                        if (args.size() == 1) {
+                            _controller->Start();
                             cmd_found = true;
-                        } catch (const std::invalid_argument& e) {
+                        } else if (args.size() == 2) {
+                            try {
+                                Modules mod = StringToModule(args[1]);
+                                Run(mod);
+                                cmd_found = true;
+                            } catch (const std::invalid_argument& e) {
+                                cmd_found = false;
+                            }
+                        } else {
+                            cmd_found = false;
+                        }
+                    } else if (args[0] == "stop") {
+                        if (args.size() == 1) {
+                            _controller->Stop();
+                            cmd_found = true;
+                        } else if (args.size() == 2) {
+                            try {
+                                Modules mod = StringToModule(args[1]);
+                                Stop(mod);
+                                cmd_found = true;
+                            } catch (const std::invalid_argument& e) {
+                                cmd_found = false;
+                            }
+                        } else {
                             cmd_found = false;
                         }
                     } else {
@@ -233,8 +278,7 @@ namespace pcapturepp {
 
     // Command Handlers
     void Cli::Run(Modules module) {
-        _controller->Start();
-        _running = true;
+        _module_running[module] = true;
 
         // Synchronization to ensure that _controller is fully initialized
         std::this_thread::sleep_for(std::chrono::milliseconds(100)); // small delay to ensure controller is ready (you may replace this with a more robust solution)
@@ -242,38 +286,39 @@ namespace pcapturepp {
         switch (module) {
             case Modules::ARP: {
                 // Use a joinable thread or at least ensure the controller has completed initialization
-                std::thread([this, module] {
-                    cli::ArpConfig* arpc = dynamic_cast<cli::ArpConfig*>(_modules[module]->GetConfig().get());
-                    if (!arpc) {
-                        std::cerr << "Failed to obtain valid ARP config." << std::endl;
-                        return; // Early exit if dynamic_cast fails
-                    }
+                if (_module_running[module]) {
+                    std::thread([this, module] {
+                        cli::ArpConfig* arpc = dynamic_cast<cli::ArpConfig*>(_modules[module]->GetConfig().get());
+                        if (!arpc) {
+                            std::cerr << "Failed to obtain valid ARP config." << std::endl;
+                            return; // Early exit if dynamic_cast fails
+                        }
 
-                    BundledConfig configs(arpc, nullptr, nullptr, nullptr);
-                    CliRequest request(configs, structures::SendTo::ARP, "", structures::Actions::START);
-                    _controller->ProcessCliRequests(request);
-                }).detach(); // Consider replacing with a joinable thread and storing it in a member variable
-                break;
+                        BundledConfig configs(arpc, nullptr, nullptr, nullptr);
+                        CliRequest request(configs, structures::SendTo::ARP, "", structures::Actions::START);
+                        _controller->ProcessCliRequests(request);
+                    }).detach(); 
+                    break;
+                }
             }
         }
 
-        // Thread to keep checking for responses
-        std::thread([this]() {
-            while (_running) {
-                std::optional<ModuleResponse> response = _controller->RespondCliBack();
-                if (response) {
-                    UpdateTimeBuffer();
-                    structures::ThreadInput *ti = new structures::ThreadInput(response->message);
-                    PrintCli(_time_buffer, ti);
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
-        }).detach(); // Consider replacing with a joinable thread and storing it in a member variable
     }
 
 
-    void Cli::Stop() {
-        _running = false;
+    void Cli::Stop(Modules module) {
+        _module_running[module] = false;
+
+        switch (module) {
+            case Modules::ARP:
+                // Use a joinable thread or at least ensure the controller has completed initialization
+                std::thread([this, module] {
+                    BundledConfig configs(nullptr, nullptr, nullptr, nullptr);
+                    CliRequest request(configs, structures::SendTo::ARP, "", structures::Actions::STOP);
+                    _controller->ProcessCliRequests(request);
+                }).detach(); 
+                break;
+        }
     }
 
     void Cli::StartArp(const vector<string>& args) {}
@@ -322,7 +367,7 @@ namespace pcapturepp {
 
         if (arg_size == 1) {
             cout << "Available commands:\n"
-                    << "  start          - Start capture\n"
+                    << "  start [module] - Start module\n"
                     << "  stop           - Stop capture\n"
                     << "  help  [module] - Show help for a specific module\n"
                     << "  status         - Show statuses of all modules\n"
@@ -438,38 +483,6 @@ namespace pcapturepp {
     
         cout.flush();
     }
-
-
-    // void Cli::PrintCli(std::tm buffer, string message, bool is_input) {
-    //     if (!message.empty() && is_input) {
-    //         if (_module_prefix.empty()) {
-    //             cout << "\33[2K\r" << C_YELLOW << "[" << std::put_time(&buffer, "%Y-%m-%d %H:%M:%S") << "]" << C_NONE << " >> " << message;
-    //         } else {
-    //             cout << "\33[2K\r" << C_YELLOW << "[" << std::put_time(&buffer, "%Y-%m-%d %H:%M:%S") << "]" << C_NONE << " (" << _module_prefix << ") >> " << message;
-    //         }
-    //         std::cout.flush();
-    //         return;
-    //     }
-
-    //     if (!message.empty()) {
-    //         if (_module_prefix.empty()) {
-    //             cout << "\33[2K\r" << C_YELLOW << "[" << std::put_time(&buffer, "%Y-%m-%d %H:%M:%S") << "]" << C_NONE << " >> " << message << endl;
-    //         } else {
-    //             cout << "\33[2K\r" << C_YELLOW << "[" << std::put_time(&buffer, "%Y-%m-%d %H:%M:%S") << "]" << C_NONE << " (" << _module_prefix << ") >> " << message << endl;
-    //         }
-    //         std::cout.flush();
-    //         return;          
-    //     }
-
-    //     if (_module_prefix.empty()) {
-    //         cout << "\33[2K\r" << C_YELLOW << "[" << std::put_time(&buffer, "%Y-%m-%d %H:%M:%S") << "]" << C_NONE << " >> ";
-    //         cout.flush();
-    //         return;
-    //     }
-
-    //     cout << "\33[2K\r" << C_YELLOW << "[" << std::put_time(&buffer, "%Y-%m-%d %H:%M:%S") << "]" << C_NONE << " (" << _module_prefix << ") >> ";
-    //     std::cout.flush();
-    // }
 
     void Cli::UpdateTimeBuffer() {
         auto now = std::chrono::system_clock::now();

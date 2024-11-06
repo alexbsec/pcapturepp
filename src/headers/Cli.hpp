@@ -82,12 +82,14 @@ namespace pcapturepp {
             array<UINT8, MAC_ADDRESS_SIZE> _src_mac;
             bool _fullduplex;
             bool _running;
+            bool _net_probed;
+            bool _probing;
             umap<string, uset<string>> _command_list;
             umap<string, DeviceInfo> _devices_found;
 
             string StartArpSpoofing(const vector<string>& args);
             string StopArpSpoofing();
-            string ProbeNet(const vector<string>& args);
+            string ProbeNet(const vector<string>& args, bool callback = false);
             void PopulateMACAddress(array<UINT8, MAC_ADDRESS_SIZE>& who, const string& mac_str);
     };
 
@@ -168,7 +170,7 @@ namespace pcapturepp {
 
             // Command handlers
             void Run(Modules module);
-            void Stop();
+            void Stop(Modules module);
             void StartArp(const vector<string>& args);
             void StopArp();
             void StartDns(const vector<string>& args);
@@ -204,7 +206,7 @@ namespace pcapturepp {
             string _module_prefix;
             uptr<controllers::MainController> _controller;
             Asynq<CliRequest> _cli_queue;
-            std::atomic<bool> _running;  
+            humap<Modules, std::atomic<bool>, structures::EnumClassHash> _module_running;  
             string _input;
             structures::CliPrintMessage *_pm;
 

@@ -30,6 +30,7 @@ namespace controllers {
         public:
             MainController();
             void Start();
+            void Stop();
             void ProcessCliRequests(const CliRequest& request);
             void ForwardToModule();
             void FetchResponseStream();
@@ -43,6 +44,8 @@ namespace controllers {
             Asynq<ModuleResponse> _cres_queue;
 
             uptr<modules::ArpSpoofer> _module;
+            std::atomic<bool> _stop_request;
+            std::vector<std::thread> _threads;
     };
 }
 }

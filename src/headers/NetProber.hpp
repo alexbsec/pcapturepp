@@ -13,15 +13,15 @@ using pcapturepp::structures::DeviceInfo;
 namespace pcapturepp {
 namespace netprober {
 
-    bool GetLocalMacAddress(const string& iface, UINT8 *mac);
-
-    void SendArpRequest(pcap_t *handle, const string& iface, const string& source_ip, const string& target_ip);
+    string GetSourceIP();
 
     string GetSubnet();
 
     string GetHostname(const string& ip);
 
-    vector<DeviceInfo> GetAllConnectedDevices(const string& iface);
+    bool GetLocalMacAddress(const std::string& iface, array<UINT8, MAC_ADDRESS_SIZE>& mac);
+
+    vector<DeviceInfo> GetAllConnectedDevices(const string& iface, int quiet = 1);
 
 }
 }

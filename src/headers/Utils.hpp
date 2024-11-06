@@ -8,6 +8,10 @@
 #include <openssl/rsa.h>
 #include <openssl/evp.h>
 #include <openssl/bn.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <cstring>
 
 namespace pcapturepp {
     vector<string> SplitByDelimiter(const string& str, char delimeter = '.');

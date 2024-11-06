@@ -45,8 +45,9 @@ namespace structures {
         string hostname;
         array<UINT8, MAC_ADDRESS_SIZE> mac;
         bool is_own;
+        bool online;
 
-        DeviceInfo() : ip("0.0.0.0"), hostname("unknown"), is_own(false) {}
+        DeviceInfo() : ip("0.0.0.0"), hostname("unknown"), is_own(false), online(false) {}
     };
 
     struct ThreadInput {

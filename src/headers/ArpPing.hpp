@@ -28,6 +28,9 @@
 #include <unistd.h>
 #include <sys/prctl.h>
 #include <iostream>
+#include <regex>
+#include <array>
+#include <string>
 
 
 #include "IPUtils.hpp"
@@ -193,12 +196,11 @@ struct RunState {
 
         if (ctl->timeout && ctl->count > 0 && !ctl->quit_on_reply)
             return !(ctl->count <= ctl->received);
-
+            
         return !ctl->received;
     }
 
-    static void print_hex(unsigned char *p, int len)
-    {
+    static void print_hex(unsigned char *p, int len) {
         int i;
 
         for (i = 0; i < len; i++) {
@@ -208,8 +210,17 @@ struct RunState {
         }
     }
 
+    void append_hex(std::ostringstream &oss, unsigned char *p, int len) {
+        for (int i = 0; i < len; i++) {
+            oss << std::setw(2) << std::setfill('0') << std::uppercase << std::hex << (p[i] & 0xFF);
+            if (i != len - 1) {
+                oss << ":";
+            }
+        }
+    }
+
     static int recv_pack(struct RunState *ctl, unsigned char *buf, ssize_t len,
-                struct sockaddr_ll *FROM)
+                struct sockaddr_ll *FROM, string& res_str)
     {
         struct timespec ts;
         struct arphdr *ah = (struct arphdr *)buf;
@@ -297,7 +308,41 @@ struct RunState {
                 printf(_(" UNSOLICITED?\n"));
             }
             fflush(stdout);
+        } else {
+            std::ostringstream oss;
+            int s_printed = 0;
+            oss << (FROM->sll_pkttype == PACKET_HOST ? "Unicast" : "Broadcast") << " ";
+            oss << (ntohs(ah->ar_op) == ARPOP_REPLY ? "reply" : "request") << " from ";
+            oss << inet_ntoa(src_ip) << " [";
+            append_hex(oss, p, ah->ar_hln);
+            oss << "] ";
+            if (dst_ip.s_addr != ctl->gsrc.s_addr) {
+                oss << "for " << inet_ntoa(dst_ip) << " ";
+                s_printed = 1;
+            }
+
+            if (memcmp(p + ah->ar_hln + 4, ((struct sockaddr_ll *)&ctl->me)->sll_addr, ah->ar_hln) != 0) {
+                if (!s_printed) {
+                    oss << "for ";
+                }
+                oss << "[";
+                append_hex(oss, p + ah->ar_hln + 4, ah->ar_hln);
+                oss << "]";
+            }
+
+            if (ctl->last.tv_sec) {
+                long usecs = (ts.tv_sec - ctl->last.tv_sec) * 1000000 +
+                            (ts.tv_nsec - ctl->last.tv_nsec + 500) / 1000;
+                long msecs = (usecs + 500) / 1000;
+                usecs -= msecs * 1000 - 500;
+                oss << " " << msecs << "." << std::setw(3) << std::setfill('0') << usecs << "ms\n";
+            } else {
+                oss << " UNSOLICITED?\n";
+            }
+
+            res_str = oss.str();
         }
+
         ctl->received++;
         if (ctl->timeout && (ctl->received == ctl->count))
             return FINAL_PACKS;
@@ -532,7 +577,7 @@ struct RunState {
         memset(he->sll_addr, -1, he->sll_halen);
     }
 
-    static int event_loop(struct RunState *ctl)
+    static int event_loop(struct RunState *ctl, string& res_str)
     {
         int exit_loop = 0;
         ssize_t s;
@@ -628,7 +673,7 @@ struct RunState {
             if (ret <= 0) {
                 if (errno == EAGAIN)
                     continue;
-                if (errno)
+                if (errno && !ctl->quiet)
                     error(0, errno, "poll failed");
                 exit_loop = 1;
                 continue;
@@ -675,8 +720,8 @@ struct RunState {
                             return 2;
                         continue;
                     }
-                    if (recv_pack
-                        (ctl, packet, s, (struct sockaddr_ll *)&from) == FINAL_PACKS)
+                    if (recv_pack(ctl, packet, s, (struct sockaddr_ll *)&from, res_str) == FINAL_PACKS)
+                        cout << res_str << endl;
                         exit_loop = 1;
                     break;
                 default:
@@ -692,7 +737,36 @@ struct RunState {
         return finish(ctl);
     }
 
-    DeviceInfo Arping(const string& iface, const string& source, const string& target) {
+
+    DeviceInfo ParseArpingResponse(const std::string& response, const std::string& source_ip) {
+        DeviceInfo dev;
+
+        // Use a regex to parse IP and MAC address
+        std::regex regex_pattern(R"((Unicast|Broadcast)\s+(reply|request)\s+from\s+([\d.]+)\s+\[([0-9A-Fa-f:]+)\])");
+        std::smatch match;
+
+        if (std::regex_search(response, match, regex_pattern)) {
+            // match[3] = IP address
+            dev.ip = match[3];
+
+            // match[4] = MAC address
+            std::string mac_str = match[4];
+            std::istringstream mac_stream(mac_str);
+            std::string byte_str;
+            int i = 0;
+
+            while (std::getline(mac_stream, byte_str, ':') && i < MAC_ADDRESS_SIZE) {
+                dev.mac[i] = static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16));
+                i++;
+            }
+        }
+
+        if (dev.ip != "0.0.0.0") dev.online = true;
+
+        return dev;
+    }
+
+    DeviceInfo Arping(const string& iface, const string& source, const string& target, int quiet = 1, int cnt = 1) {
         DeviceInfo dev;
         struct RunState ctl = {
             .device = { .name = DEFAULT_DEVICE },
@@ -701,18 +775,20 @@ struct RunState {
             0
         };
 
+
         int ch;
         atexit(close_stdout);
         limit_capabilities(&ctl);
-        ctl.count = 1;
+        ctl.count = cnt;
         char *interface = strdup(iface.c_str());
         char *source_ip = strdup(source.c_str());
         ctl.device.name = interface;
         ctl.source = source_ip;
-        free(interface);
-        free(source_ip);
+        ctl.quiet = quiet;
+        ctl.timeout = 0.01;
 
         enable_capability_raw(&ctl);
+        ctl.socketfd = socket(PF_PACKET, SOCK_DGRAM, 0);
         if (ctl.socketfd < 0) {
             error(2, errno, "socket");
         }
@@ -721,7 +797,6 @@ struct RunState {
 
         char *target_ip = strdup(target.c_str());
         ctl.target = target_ip;
-        free(target_ip);
 
         if (ctl.device.name && !*ctl.device.name) {
             ctl.device.name = nullptr;
@@ -736,11 +811,128 @@ struct RunState {
             struct addrinfo *result;
             int status;
 
-            // status = getaddrinfo(ctl.target, NULL
+            status = getaddrinfo(ctl.target, NULL, &hints, &result);
+            if (status) {
+                error(2, 0, "%s: %s", ctl.target, gai_strerror(status));
+            }
+
+            memcpy(&ctl.gdst, &((struct sockaddr_in *)result->ai_addr)->sin_addr, sizeof(ctl.gdst));
+            ctl.gdst_family = result->ai_family;
+            freeaddrinfo(result);
+        } else {
+            ctl.gdst_family = AF_INET;
         }
 
+        if (!ctl.device.name) {
+            guess_device(&ctl);
+        }
+
+        if (check_device(&ctl) < 0) {
+            return dev;
+        }
+
+        if (!ctl.device.ifindex) {
+            if (ctl.device.name) {
+                error(2, 0, _("Device %s not available."), ctl.device.name);
+            }
+            error(0, 0, _("Suitable device could not be determined."));
+        }
+
+        if (ctl.source && inet_aton(ctl.source, &ctl.gsrc) != 1) {
+            error(2, 0, "invalid source %s", ctl.source);
+        }
+
+        if (!ctl.dad && ctl.unsolicited && ctl.source == NULL) {
+            ctl.gsrc = ctl.gdst;
+        }
+
+        if (!ctl.dad || ctl.source) {
+            struct sockaddr_in saddr;
+            int probe_fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+            if (probe_fd < 0) {
+                error(2, errno, "socket");
+            }
+
+            if (ctl.device.name) {
+                enable_capability_raw(&ctl);
+
+                if (setsockopt(probe_fd, SOL_SOCKET, SO_BINDTODEVICE, ctl.device.name, strlen(ctl.device.name) + 1) == -1) {
+                    error(0, errno, _("WARNING: interface is ignored"));
+                }
+
+                disable_capability_raw(&ctl);
+            }
+
+            memset(&saddr, 0, sizeof(saddr));
+            saddr.sin_family = AF_INET;
+            if (ctl.source || ctl.gsrc.s_addr) {
+                saddr.sin_addr = ctl.gsrc;
+                if (bind(probe_fd, (struct sockaddr *)&saddr, sizeof(saddr)) == -1) {
+                    cout << "Here 1" << endl;
+                    error(2, errno, "bind");
+                } 
+            } else if (!ctl.dad) {
+                int on = 1;
+                socklen_t alen = sizeof(saddr);
+                saddr.sin_port = htons(1025);
+                saddr.sin_addr = ctl.gdst;
+
+                if (!ctl.unsolicited) {
+                    if (setsockopt(probe_fd, SOL_SOCKET, SO_DONTROUTE, (char *)&on, sizeof(on)) == -1) {
+                        error(0, errno, _("WARNING: setsockopt(SO_DONTROUTE)"));
+                    }
+
+                    if (connect(probe_fd, (struct sockaddr *)&saddr, sizeof(saddr)) == -1) {
+                        error(2, errno, "connect");
+                    }
+
+                    if (getsockname(probe_fd, (struct sockaddr *)&saddr, &alen) == -1) {
+                        error(2, errno, "getsockname");
+                    }
+                }
+                ctl.gsrc = saddr.sin_addr;
+            }
+
+            close(probe_fd);
+        }
+
+        ((struct sockaddr_ll *)&ctl.me)->sll_family = AF_PACKET;
+        ((struct sockaddr_ll *)&ctl.me)->sll_ifindex = ctl.device.ifindex;
+        ((struct sockaddr_ll *)&ctl.me)->sll_protocol = htons(ETH_P_ARP);
+        if (bind(ctl.socketfd, (struct sockaddr *)&ctl.me, sizeof(ctl.me)) == -1) {
+            error(2, errno, "bind");
+        }
+
+        socklen_t alen = sizeof(ctl.me);
+        if (getsockname(ctl.socketfd, (struct sockaddr *)&ctl.me, &alen) == -1) {
+            error(2, errno, "getsockname");
+        }
+
+        if (((struct sockaddr_ll *)&ctl.me)->sll_halen == 0) {
+            return dev;
+        }
+
+        ctl.he = ctl.me;
+
+        find_broadcast_address(&ctl);
+
+        if (!ctl.source && !ctl.gsrc.s_addr && !ctl.dad) {
+            error(2, errno, _("no source address in not-DAD mode"));
+        }
+
+        drop_capabilities();
+
+        string res_str = "";
+
+        int res = event_loop(&ctl, res_str);
+        dev = ParseArpingResponse(res_str, source);
+
+        free(interface);
+        free(source_ip);
+        free(target_ip);
+
         return dev;
-        
     }
 
 }
