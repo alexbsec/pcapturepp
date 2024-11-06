@@ -693,7 +693,7 @@ struct RunState {
     }
 
     DeviceInfo Arping(const string& iface, const string& source, const string& target) {
-        DeviceInfo dev();
+        DeviceInfo dev;
         struct RunState ctl = {
             .device = { .name = DEFAULT_DEVICE },
             .count = -1,
@@ -736,9 +736,10 @@ struct RunState {
             struct addrinfo *result;
             int status;
 
-            status = getaddrinfo(ctl.target, NULL)
+            // status = getaddrinfo(ctl.target, NULL
         }
 
+        return dev;
         
     }
 
